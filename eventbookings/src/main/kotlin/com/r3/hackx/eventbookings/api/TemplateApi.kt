@@ -1,4 +1,4 @@
-package com.template.api
+package com.r3.hackx.eventbookings.api
 
 import net.corda.core.messaging.CordaRPCOps
 import javax.ws.rs.GET

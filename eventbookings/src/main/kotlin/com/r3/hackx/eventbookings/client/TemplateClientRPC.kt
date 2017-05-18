@@ -1,7 +1,6 @@
-package com.template.client
+package com.r3.hackx.eventbookings.client
 
 import com.google.common.net.HostAndPort
-import com.template.state.TemplateState
 import net.corda.client.rpc.CordaRPCClient
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.utilities.loggerFor
@@ -36,8 +35,8 @@ private class TemplateClientRPC {
         // Log the existing TemplateStates and listen for new ones.
         futureTransactions.startWith(transactions).toBlocking().subscribe { transaction ->
             transaction.tx.outputs.forEach { output ->
-                val state = output.data as TemplateState
-                logger.info(state.toString())
+                //val state = output.data as TemplateState
+                //logger.info(state.toString())
             }
         }
     }
