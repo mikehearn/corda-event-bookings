@@ -8,7 +8,6 @@ import net.corda.core.flows.FlowException
 import net.corda.core.flows.FlowLogic
 import net.corda.core.flows.InitiatingFlow
 import net.corda.core.flows.StartableByRPC
-import net.corda.core.hours
 import net.corda.core.identity.AbstractParty
 import net.corda.core.identity.Party
 import net.corda.core.minutes
@@ -69,7 +68,7 @@ class EventBookingContract : Contract {
         when (command.value) {
             is NewBooking -> verifyNewBooking(tx, command.signers)
             is CancelBooking -> verifyCancelBooking(tx, command.signers)
-            else -> throw IllegalStateException("Unknown command $command")
+            else -> throw AssertionError()
         }
     }
 
@@ -86,12 +85,12 @@ class EventBookingContract : Contract {
     private fun verifyCancelBooking(tx: TransactionForContract, signers: List<PublicKey>) {
         check(tx.outputs.isEmpty())
         val booking = tx.inputs.single() as EventBooking
-        val txTime = tx.timestamp?.before ?: throw IllegalStateException("New bookings must be timestamped")
+        val txTime = tx.timestamp?.before ?: throw IllegalStateException("Cancellations must be timestamped")
         requireThat {
-            "You can only cancel an event up to two hours beforehand" using (txTime < booking.startTime.toInstant() - 2.hours)
+            "Cancellation must take place at least two hours before" using (txTime < booking.startTime.minusHours(2).toInstant())
             val didCustomerSign = booking.customer.owningKey in signers
             val didOrganiserSign = booking.organiser.owningKey in signers
-            "Event organisers or customers can cancel" using (didCustomerSign || didOrganiserSign)
+            "Must be signed by customer or organiser" using (didCustomerSign || didOrganiserSign)
         }
     }
 }
@@ -101,7 +100,7 @@ class NewBookingFlow {
     data class Suggestion(val startTime: ZonedDateTime, val seatLocation: String?)
 
     @InitiatingFlow @StartableByRPC
-    open class Initiator(val forEvent: String, val organiser: Party) : FlowLogic<EventBooking>() {
+    open class Initiator(val forEvent: String, val organiser: Party) : FlowLogic<Unit>() {
         companion object {
             object REQUESTING_SUGGESTION : ProgressTracker.Step("Requesting time and seat suggestion")
 
@@ -119,37 +118,31 @@ class NewBookingFlow {
         override val progressTracker = tracker()
 
         @Suspendable
-        override fun call(): EventBooking {
-            // Ask them to suggest a time and seat. Sub-classes could override this if they wanted to customise
-            // its behaviour.
+        override fun call() {
             progressTracker.currentStep = REQUESTING_SUGGESTION
             val suggestion = sendAndReceive<Suggestion>(organiser, forEvent).unwrap {
                 checkSuggestion(it)
                 it
             }
 
-            // I'm going to create a transaction with the suggested proposal and try to collect the signature of the
-            // event organiser. They can reject it if the transaction isn't OK.
-            val me = serviceHub.myInfo.legalIdentity
             val booking = EventBooking(
-                    customer = me,
+                    customer = serviceHub.myInfo.legalIdentity,
                     organiser = organiser,
-                    description = forEvent,
                     seatLocation = suggestion.seatLocation,
-                    startTime = suggestion.startTime
+                    startTime = suggestion.startTime,
+                    description = forEvent
             )
-            val tx = TransactionBuilder(notary = serviceHub.networkMapCache.getAnyNotary()).also {
+            val txb = TransactionBuilder(notary = serviceHub.networkMapCache.getAnyNotary()).also {
                 it.setTime(serviceHub.clock.instant(), 2.minutes)
-                it.addCommand(Command(EventBookingContract.NewBooking(), organiser.owningKey))
+                it.addCommand(EventBookingContract.NewBooking(), organiser.owningKey)
                 it.addOutputState(booking)
-                it.signWith(serviceHub.legalIdentityKey)
-            }.toSignedTransaction(checkSufficientSignatures = false)
+            }
+            val stx = serviceHub.signInitialTransaction(txb)
 
             progressTracker.currentStep = COLLECTING_SIGNATURES
-            val signedByOrganiser = subFlow(CollectSignaturesFlow(tx, COLLECTING_SIGNATURES.childProgressTracker()))
+            val signedByOrganiser = subFlow(CollectSignaturesFlow(stx, COLLECTING_SIGNATURES.childProgressTracker()))
             progressTracker.currentStep = FINALISING
             subFlow(FinalityFlow(signedByOrganiser, FINALISING.childProgressTracker()))
-            return booking
         }
 
         protected fun checkSuggestion(suggestion: Suggestion) = Unit
@@ -178,10 +171,10 @@ class NewBookingFlow {
 
             subFlow(object : SignTransactionFlow(counterParty) {
                 override fun checkTransaction(stx: SignedTransaction) {
-                    val booking = stx.tx.outputs[0].data as EventBooking
+                    val booking = stx.tx.outputs.single().data as EventBooking
                     requireThat {
                         "Must be a new booking transaction" using (stx.tx.commands.single().value is EventBookingContract.NewBooking)
-                        "Must be a booking for us" using (booking.organiser == serviceHub.myInfo.legalIdentity)
+                        "Must be a booking intended for us" using (booking.organiser == serviceHub.myInfo.legalIdentity)
                     }
                 }
             })
@@ -197,5 +190,5 @@ class EventBookingsService(services: PluginServiceHub) {
 }
 
 class EventBookingsPlugin : CordaPluginRegistry() {
-    override val servicePlugins = listOf(Function(::EventBookingsService))
+    override val servicePlugins: List<Function<PluginServiceHub, out Any>> = listOf(Function(::EventBookingsService))
 }
