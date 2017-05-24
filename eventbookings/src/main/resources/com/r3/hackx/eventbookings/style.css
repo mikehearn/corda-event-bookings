@@ -1,0 +1,11 @@
+.table-view {
+    -fx-background-color: #ffffffaa;
+}
+
+.table-row-cell {
+    -fx-background-color: #ffffffaa;
+}
+
+.table-row-cell:odd {
+    -fx-background-color: #eeeeeeaa;
+}

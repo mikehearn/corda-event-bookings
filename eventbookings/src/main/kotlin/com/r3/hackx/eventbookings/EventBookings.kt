@@ -1,6 +1,13 @@
 package com.r3.hackx.eventbookings
 
 import co.paralleluniverse.fibers.Suspendable
+import com.google.common.net.HostAndPort
+import javafx.collections.FXCollections
+import javafx.scene.Parent
+import javafx.scene.control.TableView
+import javafx.scene.layout.StackPane
+import net.corda.client.jfx.utils.observeOnFXThread
+import net.corda.client.rpc.CordaRPCClient
 import net.corda.core.contracts.*
 import net.corda.core.crypto.SecureHash
 import net.corda.core.crypto.commonName
@@ -24,9 +31,12 @@ import net.corda.core.utilities.unwrap
 import net.corda.flows.CollectSignaturesFlow
 import net.corda.flows.FinalityFlow
 import net.corda.flows.SignTransactionFlow
+import tornadofx.*
 import java.security.PublicKey
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.function.Function
 import javax.persistence.Column
 import javax.persistence.Entity
@@ -191,4 +201,47 @@ class EventBookingsService(services: PluginServiceHub) {
 
 class EventBookingsPlugin : CordaPluginRegistry() {
     override val servicePlugins: List<Function<PluginServiceHub, out Any>> = listOf(Function(::EventBookingsService))
+}
+
+class BookingsView : View("Bookings") {
+    override val root by fxml<StackPane>()
+    private val txTable by fxid<TableView<EventBooking>>()
+
+    init {
+        with(txTable) {
+            columnResizePolicy = SmartResize.POLICY
+            makeIndexColumn()
+            column("Event", EventBooking::description)
+            column("Start time", EventBooking::startTime) {
+                cellFormat {
+                    text = it.format(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM))
+                }
+            }
+            column("Customer", EventBooking::customer) {
+                cellFormat {
+                    text = it.nameOrNull()!!.commonName
+                }
+            }
+        }
+
+        val rpc = CordaRPCClient(HostAndPort.fromString("localhost:10009"))
+        val proxy = rpc.start("guest", "letmein").proxy
+        val (vault, updates) = proxy.vaultAndUpdates()
+
+        val bookings = FXCollections.observableArrayList(vault.map { it.state.data }.filterIsInstance<EventBooking>())
+        updates.observeOnFXThread().subscribe { update ->
+            val cancelled = update.consumedOfType<EventBooking>()
+            val booked = update.producedOfType<EventBooking>()
+            bookings.removeAll(cancelled)
+            bookings.addAll(booked)
+        }
+
+        txTable.items = bookings
+    }
+}
+
+class BookingsApp : App(BookingsView::class) {
+    init {
+        importStylesheet("/com/r3/hackx/eventbookings/style.css")
+    }
 }
