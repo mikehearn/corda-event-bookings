@@ -3,29 +3,27 @@ package com.r3.hackx.eventbookings
 import co.paralleluniverse.fibers.Suspendable
 import com.google.common.net.HostAndPort
 import javafx.collections.FXCollections
-import javafx.scene.Parent
 import javafx.scene.control.TableView
 import javafx.scene.layout.StackPane
 import net.corda.client.jfx.utils.observeOnFXThread
+import net.corda.client.jfx.utils.toFXListOfStates
 import net.corda.client.rpc.CordaRPCClient
 import net.corda.core.contracts.*
 import net.corda.core.crypto.SecureHash
 import net.corda.core.crypto.commonName
-import net.corda.core.flows.FlowException
-import net.corda.core.flows.FlowLogic
-import net.corda.core.flows.InitiatingFlow
-import net.corda.core.flows.StartableByRPC
+import net.corda.core.flows.*
 import net.corda.core.identity.AbstractParty
 import net.corda.core.identity.Party
+import net.corda.core.messaging.vaultTrackBy
 import net.corda.core.minutes
-import net.corda.core.node.CordaPluginRegistry
-import net.corda.core.node.PluginServiceHub
+import net.corda.core.node.services.Vault
 import net.corda.core.schemas.MappedSchema
 import net.corda.core.schemas.PersistentState
 import net.corda.core.schemas.QueryableState
 import net.corda.core.serialization.CordaSerializable
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.transactions.TransactionBuilder
+import net.corda.core.utilities.NetworkHostAndPort
 import net.corda.core.utilities.ProgressTracker
 import net.corda.core.utilities.unwrap
 import net.corda.flows.CollectSignaturesFlow
@@ -37,7 +35,6 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
-import java.util.function.Function
 import javax.persistence.Column
 import javax.persistence.Entity
 import javax.persistence.Table
@@ -85,7 +82,7 @@ class EventBookingContract : Contract {
     private fun verifyNewBooking(tx: TransactionForContract, signers: List<PublicKey>) {
         check(tx.inputs.isEmpty())
         val newBooking = tx.outputs.single() as EventBooking
-        val txTime = tx.timestamp?.before ?: throw IllegalStateException("New bookings must be timestamped")
+        val txTime = tx.timeWindow?.fromTime ?: throw IllegalStateException("New bookings must be timestamped")
         requireThat {
             "Bookings may not be in the past" using (txTime < newBooking.startTime.toInstant())
             "New bookings must be signed by the organiser" using (newBooking.organiser.owningKey in signers)
@@ -95,7 +92,7 @@ class EventBookingContract : Contract {
     private fun verifyCancelBooking(tx: TransactionForContract, signers: List<PublicKey>) {
         check(tx.outputs.isEmpty())
         val booking = tx.inputs.single() as EventBooking
-        val txTime = tx.timestamp?.before ?: throw IllegalStateException("Cancellations must be timestamped")
+        val txTime = tx.timeWindow?.fromTime ?: throw IllegalStateException("Cancellations must be timestamped")
         requireThat {
             "Cancellation must take place at least two hours before" using (txTime < booking.startTime.minusHours(2).toInstant())
             val didCustomerSign = booking.customer.owningKey in signers
@@ -142,11 +139,10 @@ class NewBookingFlow {
                     startTime = suggestion.startTime,
                     description = forEvent
             )
-            val txb = TransactionBuilder(notary = serviceHub.networkMapCache.getAnyNotary()).also {
-                it.setTime(serviceHub.clock.instant(), 2.minutes)
-                it.addCommand(EventBookingContract.NewBooking(), organiser.owningKey)
-                it.addOutputState(booking)
-            }
+            val txb = TransactionBuilder(notary = serviceHub.networkMapCache.getAnyNotary())
+                .setTimeWindow(serviceHub.clock.instant(), 2.minutes)
+                .addCommand(EventBookingContract.NewBooking(), organiser.owningKey)
+                .addOutputState(booking)
             val stx = serviceHub.signInitialTransaction(txb)
 
             progressTracker.currentStep = COLLECTING_SIGNATURES
@@ -158,6 +154,7 @@ class NewBookingFlow {
         protected fun checkSuggestion(suggestion: Suggestion) = Unit
     }
 
+    @InitiatedBy(Initiator::class)
     class Responder(val counterParty: Party) : FlowLogic<Unit>() {
         val events = setOf(
                 "Amazing flamenco",
@@ -192,17 +189,6 @@ class NewBookingFlow {
     }
 }
 
-// This stuff should all go away soon.
-class EventBookingsService(services: PluginServiceHub) {
-    init {
-        services.registerServiceFlow(NewBookingFlow.Initiator::class.java) { NewBookingFlow.Responder(it) }
-    }
-}
-
-class EventBookingsPlugin : CordaPluginRegistry() {
-    override val servicePlugins: List<Function<PluginServiceHub, out Any>> = listOf(Function(::EventBookingsService))
-}
-
 class BookingsView : View("Bookings") {
     override val root by fxml<StackPane>()
     private val txTable by fxid<TableView<EventBooking>>()
@@ -224,19 +210,10 @@ class BookingsView : View("Bookings") {
             }
         }
 
-        val rpc = CordaRPCClient(HostAndPort.fromString("localhost:10009"))
+        val rpc = CordaRPCClient(NetworkHostAndPort("localhost", 10009))
         val proxy = rpc.start("guest", "letmein").proxy
-        val (vault, updates) = proxy.vaultAndUpdates()
-
-        val bookings = FXCollections.observableArrayList(vault.map { it.state.data }.filterIsInstance<EventBooking>())
-        updates.observeOnFXThread().subscribe { update ->
-            val cancelled = update.consumedOfType<EventBooking>()
-            val booked = update.producedOfType<EventBooking>()
-            bookings.removeAll(cancelled)
-            bookings.addAll(booked)
-        }
-
-        txTable.items = bookings
+        val feed = proxy.vaultTrackBy<EventBooking>()
+        txTable.items = feed.toFXListOfStates()
     }
 }
 
